@@ -183,7 +183,7 @@ impl Fixture {
         });
         let controller = ControllerConnectionConfig {
             address: format!("http://{address}"),
-            ca_certificate_path: path.join("ca.pem"),
+            ca_certificate_path: Some(path.join("ca.pem")),
             heartbeat_interval: Duration::from_secs(30),
             device_authorization: false,
         };
