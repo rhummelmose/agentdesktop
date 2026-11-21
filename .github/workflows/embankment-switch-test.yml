@@ -1,0 +1,54 @@
+name: Agent Desktop Windows switch test
+on:
+  push:
+    branches: [embankment/agentdesktop-switch-test]
+permissions:
+  actions: read
+jobs:
+  switch:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - name: Download verified pilot and upstream installers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 44890002889 --repo rhummelmose/agentdesktop --name agentdesktop-preview-x86_64-pc-windows-msvc --dir preview
+          if ($LASTEXITCODE -ne 0) { throw 'Preview download failed' }
+          gh release download v0.6.0 --repo agentdesktop-dev/agentdesktop --pattern agentdesktop-windows-amd64.msi --dir official
+          if ($LASTEXITCODE -ne 0) { throw 'Official MSI download failed' }
+          $preview = (Get-ChildItem preview/*.msi).FullName
+          if ((Get-FileHash $preview).Hash -ne 'B6D09B993C17DFF40E658AEE3869F6B552F66CD268BA971E923D30FD495F8DBC') { throw 'Wrong preview MSI' }
+          if ((Get-AuthenticodeSignature (Get-ChildItem official/*.msi).FullName).Status -ne 'Valid') { throw 'Official MSI signature is invalid' }
+      - name: Verify both switch directions preserve machine configuration and state
+        shell: pwsh
+        run: |
+          function Run-Msi($operation, $package) {
+            $process = Start-Process msiexec.exe -ArgumentList @($operation, ('"' + $package + '"'), '/qn', '/norestart') -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw "MSI $operation failed with exit $($process.ExitCode)" }
+          }
+          function Assert-Installed($version) {
+            (Get-Service AgentDesktop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+            $app = "$env:ProgramFiles\Agent Desktop\agentdesktop.exe"
+            if ((Get-Item $app).VersionInfo.ProductVersion.Trim() -ne $version) { throw "Expected $version" }
+            & $app status
+            if ($LASTEXITCODE -ne 0) { throw 'Installed CLI cannot reach service' }
+          }
+          $preview = (Get-ChildItem preview/*.msi).FullName
+          $official = (Get-ChildItem official/*.msi).FullName
+          Run-Msi /i $preview
+          Assert-Installed '0.6.1'
+          $dir = "$env:ProgramData\AgentDesktop"
+          $config = Join-Path $dir config.yaml
+          $marker = Join-Path $dir state\switch-test-marker
+          New-Item -ItemType Directory -Force (Split-Path $marker) | Out-Null
+          Set-Content $marker 'preserve on switch'
+          $hash = (Get-FileHash $config).Hash
+          Run-Msi /x $preview
+          if ((Get-FileHash $config).Hash -ne $hash -or (Get-Content $marker) -ne 'preserve on switch') { throw 'Preview uninstall changed configuration or state' }
+          Run-Msi /i $official
+          Assert-Installed '0.6.0'
+          Run-Msi /i $preview
+          Assert-Installed '0.6.1'
+          if ((Get-FileHash $config).Hash -ne $hash -or (Get-Content $marker) -ne 'preserve on switch') { throw 'Switch changed configuration or state' }
